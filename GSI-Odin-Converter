@@ -1,0 +1,282 @@
+#!/bin/bash
+# Copyright 2025 David Dean (https://github.com/thefiredragon)
+# Copyright 2023 Aleksandar Radivojevic (https://github.com/sandorex)
+# Thanks for Aleksandar Radivojevic
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+# associated documentation files (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge, publish, distribute,
+# sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or substantial
+# portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+# NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+# DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+# OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# Version 2.0.0
+# Usage only for dynamic partitons devices like on Galaxy S25
+# !!! It will not work on older ones or devices without A/B Partitions. !!!
+
+
+set -e
+
+# vars
+WORKDIR=$(dirname "$(realpath "$0")")
+FIRMWARE_AP=$1
+CSC_AP=$2
+GSI_IMAGE=$3
+BINARYS="$WORKDIR"/tools/amd64/bin
+BUILDROOT="$WORKDIR"/build
+IMAGEROOT="$WORKDIR"/images
+VBMETA="$WORKDIR"/vbmeta_system.img
+OUTPUT_FILE=GSI_AP
+
+# env
+PATH=$PATH:$BINARYS
+
+# functions
+msg() {
+    echo "$1"
+}
+
+usage() {
+    msg "Usage: $0 <AP.tar.md5> <GSI.img> <CSC_OXM.tar.md5> [<super image size in bytes>]"
+    msg "[WARNING]: DO NOT CHANGE THE FIRMWARE AP FILE WITHOUT DELETEDING THE BUILD FOLDER"
+    msg
+    msg "This script requires following dependencies: lz4 tar md5sum"
+    msg "Flashing the GSI require wipe data from recovery."
+}
+
+decompressTar() {
+    tar -xvf "$FIRMWARE_AP" super.img.lz4 -C "$BUILDROOT" > /dev/null 2>&1
+    # tar is not using the output dir so we move it
+    mv "$WORKDIR"/super.img.lz4 "$BUILDROOT"
+}
+
+decompressLz4() {
+    lz4 -d "$BUILDROOT"/super.img.lz4 "$BUILDROOT"/super.img > /dev/null 2>&1
+    [[ -f "$BUILDROOT"/super.img ]] && rm "$BUILDROOT"/super.img.lz4
+}
+
+convertSparse() {
+    simg2img "$BUILDROOT"/super.img "$BUILDROOT"/super_raw.img
+    [[ -f "$BUILDROOT"/super_raw.img ]] && rm "$BUILDROOT"/super.img
+}
+
+decompressImage() {
+    lpunpack "$BUILDROOT"/super_raw.img "$IMAGEROOT"
+}
+
+superMap() {
+    lpdump "$BUILDROOT"/super_raw.img > "$BUILDROOT"/super_map.txt
+}
+
+buildCSC() {
+    tar -xvf "$CSC_AP" -C "$BUILDROOT"
+    PIT=$(find -name "*.pit" -exec basename {} \;)
+    # repack only needed things
+    tar --create \
+    -f "$WORKDIR"/CSC_AP.tar \
+    -C "$BUILDROOT" cache.img.lz4 \
+    -C "$BUILDROOT" meta-data/ \
+    -C "$BUILDROOT" "$PIT"
+}
+
+buildAP() {
+tar --create \
+    --format=gnu \
+    -b20 \
+    --quoting-style=escape \
+    --owner=0 \
+    --group=0 \
+    --totals \
+    --mode=644 \
+    -f "$WORKDIR"/"$OUTPUT_FILE".tar \
+    -C "$BUILDROOT" super.img.lz4 \
+    -C "$BUILDROOT" vbmeta_system.img.lz4
+}
+
+partitonSizes() {
+    SUPER=$(stat -c '%s' $BUILDROOT/super_raw.img)
+    ODM_A=$(stat -c '%s' $IMAGEROOT/odm_a.img)
+    ODM_B=$(stat -c '%s' $IMAGEROOT/odm_b.img)
+    PRODUCT_A=$(stat -c '%s' $IMAGEROOT/product_a.img)
+    PRODUCT_B=$(stat -c '%s' $IMAGEROOT/product_b.img)
+    SYSTEM_A=$(stat -c '%s' $IMAGEROOT/system_a.img)
+    SYSTEM_B=$(stat -c '%s' $IMAGEROOT/system_b.img)
+    SYSTEM_DLKM_A=$(stat -c '%s' $IMAGEROOT/system_dlkm_a.img)
+    SYSTEM_DLKM_B=$(stat -c '%s' $IMAGEROOT/system_dlkm_b.img)
+    SYSTEM_EXT_A=$(stat -c '%s' $IMAGEROOT/system_ext_a.img)
+    SYSTEM_EXT_B=$(stat -c '%s' $IMAGEROOT/system_ext_b.img)
+    VENDOR_A=$(stat -c '%s' $IMAGEROOT/vendor_a.img)
+    VENDOR_B=$(stat -c '%s' $IMAGEROOT/vendor_b.img)
+    VENDOR_DLKM_A=$(stat -c '%s' $IMAGEROOT/vendor_dlkm_a.img)
+    VENDOR_DLKM_B=$(stat -c '%s' $IMAGEROOT/vendor_dlkm_b.img)
+    GSI=$(stat -c '%s' $GSI_IMAGE)
+    SUM_SIZE=`expr $ODM_A + $ODM_B + $PRODUCT_A + $PRODUCT_B + $GSI + $SYSTEM_B + $SYSTEM_DLKM_A + $SYSTEM_DLKM_B + $SYSTEM_EXT_A + $SYSTEM_EXT_B + $VENDOR_A + $VENDOR_B + $VENDOR_DLKM_A + $VENDOR_DLKM_B`
+    SUPER_OUT=${3:-$SUPER}
+    
+    # show sizes
+    
+    msg "SUPER:             $SUPER"
+    msg "ODM_A:             $ODM_A"
+    msg "ODM_B:             $ODM_B"
+    msg "PRODUCT_A          $PRODUCT_A"
+    msg "PRODUCT_B:         $PRODUCT_B"
+    msg "SYSTEM_A:          $SYSTEM_A"
+    msg "SYSTEM_B:          $SYSTEM_B"
+    msg "SYSTEM_DLKM_A:     $SYSTEM_DLKM_A"
+    msg "SYSTEM_DLKM_B:     $SYSTEM_DLKM_B"
+    msg "SYSTEM_EXT_A:      $SYSTEM_EXT_A"
+    msg "SYSTEM_EXT_B:      $SYSTEM_EXT_B"
+    msg "VENDOR_A:          $VENDOR_A"
+    msg "VENDOR_B:          $VENDOR_B"
+    msg "VENDOR_DLKM_A:     $VENDOR_DLKM_A"
+    msg "VENDOR_DLKM_B:     $VENDOR_DLKM_B"
+    msg
+    msg "GSI:               $GSI"
+    msg
+    msg "SUM:               $SUM_SIZE"
+    msg "OUT:               $SUPER_OUT"
+
+    [[ "$SUPER_OUT" -le "$SUM_SIZE" ]] && \
+    msg ":: ERROR: Output image is bigger than original super image, rerun the script with correct super image size" \
+    exit 1
+
+    GROUP_A_SIZE=$(grep -A 1 "Name: qti_dynamic_partitions_a" $BUILDROOT/super_map.txt | grep "Maximum size" | awk '{print $3}')
+    GROUP_B_SIZE=$(grep -A 1 "Name: qti_dynamic_partitions_b" $BUILDROOT/super_map.txt | grep "Maximum size" | awk '{print $3}')
+}
+
+buildImage() {
+    lpmake  --metadata-size 65536 \
+            --metadata-slots 3 \
+            --device-size=$SUPER \
+            --group=qti_dynamic_partitions_a:$GROUP_A_SIZE \
+            --partition=odm_a:readonly:$ODM_A:qti_dynamic_partitions_a \
+            --partition=product_a:readonly:$PRODUCT_A:qti_dynamic_partitions_a \
+            --partition=system_a:readonly:$GSI:qti_dynamic_partitions_a \
+            --partition=system_ext_a:readonly:$SYSTEM_EXT_A:qti_dynamic_partitions_a \
+            --partition=vendor_a:readonly:$VENDOR_A:qti_dynamic_partitions_a \
+            --partition=system_dlkm_a:readonly:$SYSTEM_DLKM_A:qti_dynamic_partitions_a \
+            --partition=vendor_dlkm_a:readonly:$VENDOR_DLKM_A:qti_dynamic_partitions_a \
+            --image=odm_a=$IMAGEROOT/odm_a.img \
+            --image=product_a=$IMAGEROOT/product_a.img \
+            --image=system_a=$GSI_IMAGE \
+            --image=system_ext_a=$IMAGEROOT/system_ext_a.img \
+            --image=vendor_a=$IMAGEROOT/vendor_a.img \
+            --image=system_dlkm_a=$IMAGEROOT/system_dlkm_a.img \
+            --image=vendor_dlkm_a=$IMAGEROOT/vendor_dlkm_a.img \
+            --group=qti_dynamic_partitions_b:$GROUP_B_SIZE \
+            --partition=odm_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=product_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=system_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=system_ext_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=vendor_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=system_dlkm_b:readonly:10:qti_dynamic_partitions_b \
+            --partition=vendor_dlkm_b:readonly:10:qti_dynamic_partitions_b \
+            --image=odm_b=$IMAGEROOT/odm_b.img \
+            --image=product_b=$IMAGEROOT/product_b.img \
+            --image=system_b=$IMAGEROOT/system_b.img \
+            --image=system_ext_b=$IMAGEROOT/system_ext_b.img \
+            --image=vendor_b=$IMAGEROOT/vendor_b.img \
+            --image=system_dlkm_b=$IMAGEROOT/system_dlkm_b.img \
+            --image=vendor_dlkm_b=$IMAGEROOT/vendor_dlkm_b.img \
+            --sparse \
+            --output $BUILDROOT/super.img
+}
+
+
+[[ -z "$FIRMWARE_AP" ]] && usage && exit 1
+[[ -z "$CSC_AP" ]] && usage && exit 1
+[[ -z "$GSI_IMAGE" ]] && usage && exit 1
+
+# get absolute paths
+FIRMWARE_AP=$(realpath "$FIRMWARE_AP")
+CSC_AP=$(realpath "$CSC_AP")
+GSI_IMAGE=$(realpath "$GSI_IMAGE")
+
+# check if all utilities are installed
+( hash lz4 && hash tar && hash md5sum ) || (msg "Please install the dependenices" && exit 1)
+
+# check if a current build exists and exit
+[[ -d "$BUILDROOT" ]] && \
+msg ":: [WARNING]: Build directory already exists, if you changed the firmware delete build directory and restart!" && exit 0
+
+[[ ! $FIRMWARE_AP == *tar.md5 ]] && msg ":: [WARNING]: $FIRMWARE_AP File is not a AP*.tar.md5 file." && exit 0
+[[ ! $CSC_AP == *tar.md5 ]] && msg ":: [WARNING]: $CSC_AP File is not a AP*.tar.md5 file." && exit 0
+[[ ! $GSI_IMAGE == *.img ]] && msg ":: [WARNING]: $GSI_IMAGE File is not a GSI*.img file." && exit 0
+
+mkdir -p "$BUILDROOT"
+mkdir -p "$IMAGEROOT"
+msg
+
+msg ":: Extracting firmware AP"
+decompressTar
+msg
+
+msg ":: Uncompressing super image"
+decompressLz4
+msg
+
+msg ":: Convert sparse image"
+convertSparse
+msg
+
+msg ":: Unpacking super image"
+decompressImage
+msg
+
+msg ":: Getting partiton table"
+superMap
+msg
+
+msg ":: Getting size of partitions"
+partitonSizes
+msg
+
+msg ":: Build super image"
+buildImage
+msg
+
+msg ":: Compressing super image"
+lz4 -f -B6 --content-size $BUILDROOT/super.img $BUILDROOT/super.img.lz4
+msg
+
+msg ":: Copying clean vbmeta image"
+[[ ! -f $BUILDROOT/vbmeta.img.lz4 ]] && cp "$VBMETA" $BUILDROOT
+msg
+
+msg ":: Compresing clean vbmeta image"
+[[ ! -f $BUILDROOT/vbmeta.img.lz4 ]] && lz4 -B6 --content-size $BUILDROOT/vbmeta_system.img $BUILDROOT/vbmeta_system.img.lz4
+msg
+
+msg ":: Build CSC file"
+buildCSC
+msg
+
+msg ":: Build AP file"
+buildAP
+msg
+
+#msg ":: Adding checksum to the tar file"
+#md5sum -t "$BUILDROOT"/"$OUTPUT_FILE".tar >> "$BUILDROOT"/"$OUTPUT_FILE".tar
+#msg
+
+#msg ":: Renaming the tar file file"
+#mv "$BUILDROOT"/"$OUTPUT_FILE".tar "$WORKDIR"/"$OUTPUT_FILE".tar.md5
+#msg
+
+msg ":: Remove tmp folders"
+rm -rf "$BUILDROOT"
+rm -rf "$IMAGEROOT"
+msg
+
+msg ":: Successfully created '${OUTPUT_FILE}.tar' and CSC_AP.tar."
+msg
+msg
+msg "You can now flash on AP slot GSI_AP.tar and on CSC slot CSC_AP"
+msg
